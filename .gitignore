@@ -1,0 +1,9 @@
+server/chat.db
+node_modules/
+dist/
+build/
+.env
+.env.*
+.vite/
+coverage/
+*.log

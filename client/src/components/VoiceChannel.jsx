@@ -1,180 +1,110 @@
 import { useEffect, useRef, useState } from "react";
 import socket from "../socket";
 
+const MIC_DEVICE_STORAGE_KEY = "voice_selected_mic_device_id";
+
 function VoiceChannel({ roomName }) {
   const [isInRoom, setIsInRoom] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [users, setUsers] = useState([]);
   const [isJoining, setIsJoining] = useState(false);
 
+  const [availableMics, setAvailableMics] = useState([]);
+  const [selectedMicId, setSelectedMicId] = useState("");
+
   const localStreamRef = useRef(null);
   const peersRef = useRef({});
   const audioElementsRef = useRef({});
   const joinedRoomRef = useRef(null);
-
-  // Erken gelen ICE candidate'ları bekletiyoruz
   const pendingCandidatesRef = useRef({});
-
-  // Component gerçekten aktif mi?
   const mountedRef = useRef(true);
 
-  // ------------------------------------
-  // JBL CİHAZINI BUL
-  // ------------------------------------
+  // =========================================================
+  // MİKROFONLARI GETİR
+  // =========================================================
 
-  async function findJblDevices() {
+  async function refreshMicList(stream = null) {
     try {
       const devices =
         await navigator.mediaDevices.enumerateDevices();
 
-      const jblInput = devices.find((device) => {
-        const label = device.label.toLowerCase();
-
-        return (
-          device.kind === "audioinput" &&
-          (
-            label.includes("jbl") ||
-            label.includes("t520") ||
-            label.includes("hands-free")
-          )
-        );
-      });
-
-      const jblOutput = devices.find((device) => {
-        const label = device.label.toLowerCase();
-
-        return (
-          device.kind === "audiooutput" &&
-          (
-            label.includes("jbl") ||
-            label.includes("t520") ||
-            label.includes("hands-free")
-          )
-        );
-      });
-
-      console.log(
-        "[voice] JBL mikrofon:",
-        jblInput
-          ? jblInput.label
-          : "Bulunamadı"
+      const microphones = devices.filter(
+        (device) => device.kind === "audioinput"
       );
 
-      console.log(
-        "[voice] JBL ses çıkışı:",
-        jblOutput
-          ? jblOutput.label
-          : "Bulunamadı"
-      );
+      setAvailableMics(microphones);
 
-      return {
-        input: jblInput,
-        output: jblOutput,
-      };
+      if (stream) {
+        const track = stream.getAudioTracks()[0];
+
+        if (track) {
+          const settings = track.getSettings();
+
+          if (settings.deviceId) {
+            setSelectedMicId(settings.deviceId);
+
+            localStorage.setItem(
+              MIC_DEVICE_STORAGE_KEY,
+              settings.deviceId
+            );
+          }
+        }
+      }
     } catch (error) {
       console.error(
-        "[voice] Cihazlar bulunamadı:",
+        "[voice] Mikrofon listesi alınamadı:",
         error
       );
-
-      return {
-        input: null,
-        output: null,
-      };
     }
   }
 
-  // ------------------------------------
+  // =========================================================
   // UZAK SESİ OYNAT
-  // ------------------------------------
+  // =========================================================
 
-  async function playRemoteAudio(
-    userId,
-    stream
-  ) {
+  async function playRemoteAudio(userId, stream) {
     let audio =
       audioElementsRef.current[userId];
 
     if (!audio) {
-      audio =
-        document.createElement("audio");
+      audio = document.createElement("audio");
 
       audio.autoplay = true;
       audio.playsInline = true;
       audio.controls = false;
       audio.volume = 1;
+      audio.muted = false;
 
-      audioElementsRef.current[userId] =
-        audio;
+      audioElementsRef.current[userId] = audio;
 
       document.body.appendChild(audio);
     }
 
     audio.srcObject = stream;
 
-    // JBL çıkışını bul ve mümkünse ona yönlendir
-    try {
-      if (
-        typeof audio.setSinkId ===
-        "function"
-      ) {
-        const devices =
-          await navigator.mediaDevices.enumerateDevices();
-
-        const jblOutput =
-          devices.find((device) => {
-            const label =
-              device.label.toLowerCase();
-
-            return (
-              device.kind ===
-                "audiooutput" &&
-              (
-                label.includes("jbl") ||
-                label.includes("t520") ||
-                label.includes(
-                  "hands-free"
-                )
-              )
-            );
-          });
-
-        if (jblOutput) {
-          await audio.setSinkId(
-            jblOutput.deviceId
-          );
-
-          console.log(
-            `[voice] Ses JBL çıkışına yönlendirildi: ${jblOutput.label}`
-          );
-        }
-      }
-    } catch (error) {
-      console.warn(
-        "[voice] JBL ses çıkışı seçilemedi:",
-        error
-      );
-    }
-
     try {
       await audio.play();
 
       console.log(
-        `[voice] ${userId} sesi oynatılıyor`
+        `[voice-debug] Uzak ses oynatılıyor: ${userId}`
       );
     } catch (error) {
       console.warn(
-        `[voice] ${userId} sesi otomatik başlatılamadı:`,
+        `[voice-debug] Uzak ses oynatılamadı: ${userId}`,
         error
       );
     }
   }
 
-  // ------------------------------------
-  // PEER TEMİZLE
-  // ------------------------------------
+  // =========================================================
+  // PEER SİL
+  // =========================================================
 
   function removePeer(userId) {
+    console.log(
+      `[voice-debug] PEER SİLİNİYOR: ${userId}`
+    );
+
     const peer =
       peersRef.current[userId];
 
@@ -182,11 +112,17 @@ function VoiceChannel({ roomName }) {
       try {
         peer.ontrack = null;
         peer.onicecandidate = null;
-        peer.onconnectionstatechange =
-          null;
-
+        peer.onconnectionstatechange = null;
+        peer.oniceconnectionstatechange = null;
+        peer.onsignalingstatechange = null;
+        peer.onicegatheringstatechange = null;
         peer.close();
-      } catch {}
+      } catch (error) {
+        console.warn(
+          "[voice-debug] Peer kapatılırken hata:",
+          error
+        );
+      }
 
       delete peersRef.current[userId];
     }
@@ -200,25 +136,27 @@ function VoiceChannel({ roomName }) {
         audio.srcObject = null;
         audio.remove();
       } catch {}
-
+      
       delete audioElementsRef.current[userId];
     }
 
-    delete pendingCandidatesRef.current[
-      userId
-    ];
+    delete pendingCandidatesRef.current[userId];
   }
 
-  // ------------------------------------
-  // TÜM PEER'LARI TEMİZLE
-  // ------------------------------------
+  // =========================================================
+  // TÜM PEER'LARI SİL
+  // =========================================================
 
   function removeAllPeers() {
-    Object.keys(
-      peersRef.current
-    ).forEach((userId) => {
-      removePeer(userId);
-    });
+    console.log(
+      "[voice-debug] TÜM PEER'LAR SİLİNİYOR"
+    );
+
+    Object.keys(peersRef.current).forEach(
+      (userId) => {
+        removePeer(userId);
+      }
+    );
 
     Object.keys(
       audioElementsRef.current
@@ -231,33 +169,93 @@ function VoiceChannel({ roomName }) {
         audio.srcObject = null;
         audio.remove();
       } catch {}
-
-      delete audioElementsRef.current[
-        userId
-      ];
     });
 
+    peersRef.current = {};
+    audioElementsRef.current = {};
     pendingCandidatesRef.current = {};
   }
 
-  // ------------------------------------
-  // PEER OLUŞTUR
-  // ------------------------------------
+  // =========================================================
+  // OPUS / AUDIO AYARLARI
+  // =========================================================
 
-  function createPeer(
-    userId,
-    initiator
-  ) {
+  async function configureAudioSender(peer) {
+    try {
+      const sender = peer
+        .getSenders()
+        .find(
+          (item) =>
+            item.track &&
+            item.track.kind === "audio"
+        );
+
+      if (!sender) {
+        console.warn(
+          "[voice-debug] Audio sender bulunamadı."
+        );
+
+        return;
+      }
+
+      const parameters =
+        sender.getParameters();
+
+      if (!parameters.encodings) {
+        parameters.encodings = [{}];
+      }
+
+      parameters.encodings =
+        parameters.encodings.map(
+          (encoding) => ({
+            ...encoding,
+            maxBitrate: 128000,
+            maxFramerate: undefined,
+          })
+        );
+
+      await sender.setParameters(
+        parameters
+      );
+
+      console.log(
+        "[voice-debug] Audio sender bitrate: 128kbps"
+      );
+    } catch (error) {
+      console.warn(
+        "[voice-debug] Audio sender ayarlanamadı:",
+        error
+      );
+    }
+  }
+
+  // =========================================================
+  // PEER OLUŞTUR
+  // =========================================================
+
+  function createPeer(userId, initiator) {
     if (!localStreamRef.current) {
+      console.warn(
+        `[voice-debug] ${userId} için peer oluşturulamadı: local stream yok`
+      );
+
       return null;
     }
 
     if (peersRef.current[userId]) {
+      console.log(
+        `[voice-debug] ${userId} için mevcut peer kullanılıyor`
+      );
+
       return peersRef.current[userId];
     }
 
     console.log(
-      `[voice] Peer oluşturuluyor: ${userId}, initiator=${initiator}`
+      `[voice-debug] PEER OLUŞTURULUYOR: ${userId}`,
+      {
+        initiator,
+        socketId: socket.id,
+      }
     );
 
     const peer =
@@ -277,69 +275,157 @@ function VoiceChannel({ roomName }) {
     peersRef.current[userId] =
       peer;
 
-    // --------------------------------
+    // =======================================================
+    // WEBRTC DEBUG
+    // =======================================================
+
+    peer.oniceconnectionstatechange = () => {
+      console.log(
+        `[voice-debug] ICE ${userId}:`,
+        peer.iceConnectionState
+      );
+    };
+
+    peer.onsignalingstatechange = () => {
+      console.log(
+        `[voice-debug] SIGNALING ${userId}:`,
+        peer.signalingState
+      );
+    };
+
+    peer.onconnectionstatechange = () => {
+      console.log(
+        `[voice-debug] CONNECTION ${userId}:`,
+        peer.connectionState
+      );
+
+      /*
+       * ÖNEMLİ:
+       * Burada artık failed olduğunda peer'ı otomatik silmiyoruz.
+       *
+       * Önce gerçek sorunu tespit edeceğiz.
+       */
+
+      if (
+        peer.connectionState ===
+        "failed"
+      ) {
+        console.error(
+          `[voice-debug] ❌ WEBRTC BAĞLANTISI FAILED: ${userId}`
+        );
+      }
+
+      if (
+        peer.connectionState ===
+        "disconnected"
+      ) {
+        console.warn(
+          `[voice-debug] ⚠️ WEBRTC BAĞLANTISI DISCONNECTED: ${userId}`
+        );
+      }
+
+      if (
+        peer.connectionState ===
+        "connected"
+      ) {
+        console.log(
+          `[voice-debug] ✅ WEBRTC BAĞLANTISI CONNECTED: ${userId}`
+        );
+      }
+    };
+
+    peer.onicegatheringstatechange = () => {
+      console.log(
+        `[voice-debug] ICE GATHERING ${userId}:`,
+        peer.iceGatheringState
+      );
+    };
+
+    // =======================================================
     // MİKROFON TRACK
-    // --------------------------------
+    // =======================================================
 
     const tracks =
       localStreamRef.current.getTracks();
 
     tracks.forEach((track) => {
+      console.log(
+        `[voice-debug] Track ekleniyor ${userId}:`,
+        {
+          kind: track.kind,
+          label: track.label,
+          enabled: track.enabled,
+          readyState: track.readyState,
+        }
+      );
+
       peer.addTrack(
         track,
         localStreamRef.current
       );
     });
 
-    // --------------------------------
+    configureAudioSender(peer);
+
+    // =======================================================
     // UZAK SES
-    // --------------------------------
+    // =======================================================
 
     peer.ontrack = (event) => {
       console.log(
-        `[voice] ${userId} tarafından ses track'i geldi`
+        `[voice-debug] UZAK TRACK GELDİ: ${userId}`,
+        {
+          kind: event.track?.kind,
+          label: event.track?.label,
+          readyState: event.track?.readyState,
+          streams: event.streams?.length,
+        }
       );
 
-      let remoteStream =
+      let stream =
         event.streams?.[0];
 
-      // Bazı tarayıcılarda event.streams boş olabilir
-      if (!remoteStream) {
-        remoteStream =
-          new MediaStream();
+      if (!stream) {
+        stream = new MediaStream();
 
         if (event.track) {
-          remoteStream.addTrack(
+          stream.addTrack(
             event.track
           );
         }
       }
 
-      if (!remoteStream) {
-        console.warn(
-          "[voice] Remote stream bulunamadı"
+      playRemoteAudio(
+        userId,
+        stream
+      );
+    };
+
+    // =======================================================
+    // ICE
+    // =======================================================
+
+    peer.onicecandidate = (event) => {
+      if (!event.candidate) {
+        console.log(
+          `[voice-debug] ICE candidate gathering tamamlandı: ${userId}`
         );
 
         return;
       }
 
-      playRemoteAudio(
-        userId,
-        remoteStream
-      );
-    };
+      if (!joinedRoomRef.current) {
+        console.warn(
+          `[voice-debug] ICE candidate gönderilmedi: odada değiliz`
+        );
 
-    // --------------------------------
-    // ICE
-    // --------------------------------
-
-    peer.onicecandidate = (event) => {
-      if (
-        !event.candidate ||
-        !joinedRoomRef.current
-      ) {
         return;
       }
+
+      console.log(
+        `[voice-debug] ICE candidate gönderiliyor: ${userId}`,
+        event.candidate.candidate
+      );
 
       socket.emit(
         "voice:signal",
@@ -352,29 +438,9 @@ function VoiceChannel({ roomName }) {
       );
     };
 
-    // --------------------------------
-    // CONNECTION STATE
-    // --------------------------------
-
-    peer.onconnectionstatechange =
-      () => {
-        console.log(
-          `[voice] ${userId} bağlantı durumu: ${peer.connectionState}`
-        );
-
-        if (
-          peer.connectionState ===
-            "failed" ||
-          peer.connectionState ===
-            "closed"
-        ) {
-          removePeer(userId);
-        }
-      };
-
-    // --------------------------------
+    // =======================================================
     // OFFER
-    // --------------------------------
+    // =======================================================
 
     if (initiator) {
       createOffer(
@@ -386,25 +452,32 @@ function VoiceChannel({ roomName }) {
     return peer;
   }
 
-  // ------------------------------------
+  // =========================================================
   // OFFER OLUŞTUR
-  // ------------------------------------
+  // =========================================================
 
   async function createOffer(
     userId,
     peer
   ) {
     try {
+      console.log(
+        `[voice-debug] OFFER oluşturuluyor: ${userId}`
+      );
+
       const offer =
         await peer.createOffer({
           offerToReceiveAudio: true,
         });
 
-      // Peer kapanmışsa devam etme
       if (
         peer.signalingState ===
         "closed"
       ) {
+        console.warn(
+          `[voice-debug] Offer gönderilemedi, peer kapalı: ${userId}`
+        );
+
         return;
       }
 
@@ -412,11 +485,17 @@ function VoiceChannel({ roomName }) {
         offer
       );
 
-      if (
-        !joinedRoomRef.current
-      ) {
+      if (!joinedRoomRef.current) {
+        console.warn(
+          "[voice-debug] Offer gönderilmedi: odada değiliz."
+        );
+
         return;
       }
+
+      console.log(
+        `[voice-debug] OFFER gönderiliyor: ${userId}`
+      );
 
       socket.emit(
         "voice:signal",
@@ -426,26 +505,26 @@ function VoiceChannel({ roomName }) {
           sdp: peer.localDescription,
         }
       );
-
-      console.log(
-        `[voice] Offer gönderildi: ${userId}`
-      );
     } catch (error) {
       console.error(
-        `[voice] Offer hatası (${userId}):`,
+        `[voice-debug] ❌ OFFER HATASI ${userId}:`,
         error
       );
     }
   }
 
-  // ------------------------------------
+  // =========================================================
   // OFFER AL
-  // ------------------------------------
+  // =========================================================
 
   async function handleOffer(
     sender,
     sdp
   ) {
+    console.log(
+      `[voice-debug] OFFER ALINDI: ${sender}`
+    );
+
     let peer =
       peersRef.current[sender];
 
@@ -461,13 +540,12 @@ function VoiceChannel({ roomName }) {
     }
 
     try {
-      // Yanlış state'te answer üretme
       if (
         peer.signalingState !==
         "stable"
       ) {
         console.warn(
-          `[voice] Offer atlandı (${sender}), state=${peer.signalingState}`
+          `[voice-debug] Offer reddedildi. Signaling state: ${peer.signalingState}`
         );
 
         return;
@@ -477,7 +555,10 @@ function VoiceChannel({ roomName }) {
         new RTCSessionDescription(sdp)
       );
 
-      // Bekleyen ICE'ları uygula
+      console.log(
+        `[voice-debug] Remote description ayarlandı: ${sender}`
+      );
+
       await flushPendingCandidates(
         sender,
         peer
@@ -490,11 +571,13 @@ function VoiceChannel({ roomName }) {
         answer
       );
 
-      if (
-        !joinedRoomRef.current
-      ) {
+      if (!joinedRoomRef.current) {
         return;
       }
+
+      console.log(
+        `[voice-debug] ANSWER gönderiliyor: ${sender}`
+      );
 
       socket.emit(
         "voice:signal",
@@ -504,30 +587,34 @@ function VoiceChannel({ roomName }) {
           sdp: peer.localDescription,
         }
       );
-
-      console.log(
-        `[voice] Answer gönderildi: ${sender}`
-      );
     } catch (error) {
       console.error(
-        `[voice] Answer hatası (${sender}):`,
+        `[voice-debug] ❌ ANSWER OLUŞTURMA HATASI ${sender}:`,
         error
       );
     }
   }
 
-  // ------------------------------------
+  // =========================================================
   // ANSWER AL
-  // ------------------------------------
+  // =========================================================
 
   async function handleAnswer(
     sender,
     sdp
   ) {
+    console.log(
+      `[voice-debug] ANSWER ALINDI: ${sender}`
+    );
+
     const peer =
       peersRef.current[sender];
 
     if (!peer) {
+      console.warn(
+        `[voice-debug] Answer geldi fakat peer bulunamadı: ${sender}`
+      );
+
       return;
     }
 
@@ -537,7 +624,7 @@ function VoiceChannel({ roomName }) {
         "have-local-offer"
       ) {
         console.warn(
-          `[voice] Answer atlandı (${sender}), state=${peer.signalingState}`
+          `[voice-debug] Answer işlenmedi. Signaling state: ${peer.signalingState}`
         );
 
         return;
@@ -547,25 +634,25 @@ function VoiceChannel({ roomName }) {
         new RTCSessionDescription(sdp)
       );
 
+      console.log(
+        `[voice-debug] Remote answer ayarlandı: ${sender}`
+      );
+
       await flushPendingCandidates(
         sender,
         peer
       );
-
-      console.log(
-        `[voice] Answer işlendi: ${sender}`
-      );
     } catch (error) {
       console.error(
-        `[voice] Answer işleme hatası (${sender}):`,
+        `[voice-debug] ❌ ANSWER İŞLEME HATASI ${sender}:`,
         error
       );
     }
   }
 
-  // ------------------------------------
+  // =========================================================
   // ICE CANDIDATE
-  // ------------------------------------
+  // =========================================================
 
   async function handleCandidate(
     sender,
@@ -575,32 +662,15 @@ function VoiceChannel({ roomName }) {
       return;
     }
 
+    console.log(
+      `[voice-debug] ICE candidate ALINDI: ${sender}`
+    );
+
     const peer =
       peersRef.current[sender];
 
-    if (!peer) {
-      if (
-        !pendingCandidatesRef.current[
-          sender
-        ]
-      ) {
-        pendingCandidatesRef.current[
-          sender
-        ] = [];
-      }
-
-      pendingCandidatesRef.current[
-        sender
-      ].push(candidate);
-
-      console.log(
-        `[voice] ICE beklemeye alındı: ${sender}`
-      );
-
-      return;
-    }
-
     if (
+      !peer ||
       !peer.remoteDescription
     ) {
       if (
@@ -618,7 +688,7 @@ function VoiceChannel({ roomName }) {
       ].push(candidate);
 
       console.log(
-        `[voice] ICE remote description bekliyor: ${sender}`
+        `[voice-debug] ICE candidate beklemeye alındı: ${sender}`
       );
 
       return;
@@ -632,19 +702,19 @@ function VoiceChannel({ roomName }) {
       );
 
       console.log(
-        `[voice] ICE işlendi: ${sender}`
+        `[voice-debug] ICE candidate eklendi: ${sender}`
       );
     } catch (error) {
-      console.error(
-        `[voice] ICE candidate hatası (${sender}):`,
+      console.warn(
+        `[voice-debug] ICE candidate hatası ${sender}:`,
         error
       );
     }
   }
 
-  // ------------------------------------
-  // BEKLEYEN ICE'LARI UYGULA
-  // ------------------------------------
+  // =========================================================
+  // BEKLEYEN ICE
+  // =========================================================
 
   async function flushPendingCandidates(
     userId,
@@ -663,7 +733,7 @@ function VoiceChannel({ roomName }) {
     }
 
     console.log(
-      `[voice] ${candidates.length} bekleyen ICE uygulanıyor: ${userId}`
+      `[voice-debug] ${candidates.length} bekleyen ICE candidate ekleniyor: ${userId}`
     );
 
     for (
@@ -677,7 +747,7 @@ function VoiceChannel({ roomName }) {
         );
       } catch (error) {
         console.warn(
-          `[voice] Bekleyen ICE uygulanamadı (${userId}):`,
+          `[voice-debug] Bekleyen ICE hatası ${userId}:`,
           error
         );
       }
@@ -688,9 +758,132 @@ function VoiceChannel({ roomName }) {
     ];
   }
 
-  // ------------------------------------
+  // =========================================================
+  // MİKROFON DEĞİŞTİR
+  // =========================================================
+
+  async function handleMicChange(
+    deviceId
+  ) {
+    if (
+      !deviceId ||
+      deviceId === selectedMicId
+    ) {
+      return;
+    }
+
+    try {
+      const newStream =
+        await navigator.mediaDevices.getUserMedia(
+          {
+            audio: {
+              deviceId: {
+                exact: deviceId,
+              },
+
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+
+              channelCount: 1,
+              sampleRate: 48000,
+              sampleSize: 16,
+            },
+          }
+        );
+
+      const newTrack =
+        newStream.getAudioTracks()[0];
+
+      if (!newTrack) {
+        newStream
+          .getTracks()
+          .forEach((track) =>
+            track.stop()
+          );
+
+        return;
+      }
+
+      newTrack.enabled =
+        !isMuted;
+
+      const peers =
+        Object.values(
+          peersRef.current
+        );
+
+      for (const peer of peers) {
+        const sender =
+          peer
+            .getSenders()
+            .find(
+              (item) =>
+                item.track &&
+                item.track.kind ===
+                  "audio"
+            );
+
+        if (sender) {
+          try {
+            await sender.replaceTrack(
+              newTrack
+            );
+
+            await configureAudioSender(
+              peer
+            );
+          } catch (error) {
+            console.warn(
+              "[voice] Track değiştirilemedi:",
+              error
+            );
+          }
+        }
+      }
+
+      if (localStreamRef.current) {
+        localStreamRef.current
+          .getTracks()
+          .forEach((track) =>
+            track.stop()
+          );
+      }
+
+      localStreamRef.current =
+        newStream;
+
+      setSelectedMicId(deviceId);
+
+      localStorage.setItem(
+        MIC_DEVICE_STORAGE_KEY,
+        deviceId
+      );
+
+      await refreshMicList(
+        newStream
+      );
+
+      console.log(
+        "[voice] Mikrofon değiştirildi:",
+        newTrack.label,
+        newTrack.getSettings()
+      );
+    } catch (error) {
+      console.error(
+        "[voice] Mikrofon değiştirilemedi:",
+        error
+      );
+
+      alert(
+        "Seçilen mikrofona geçilemedi."
+      );
+    }
+  }
+
+  // =========================================================
   // ODAYA GİR
-  // ------------------------------------
+  // =========================================================
 
   async function joinRoom() {
     if (
@@ -703,95 +896,63 @@ function VoiceChannel({ roomName }) {
     setIsJoining(true);
 
     console.log(
-      `[voice] Mikrofon hazırlanıyor: ${roomName}`
+      "[voice-debug] ODAYA GİRİŞ BAŞLADI:",
+      roomName
     );
 
-    try {
-      // Önce mevcut cihazları kontrol et
-      let devices =
-        await findJblDevices();
+    const savedDeviceId =
+      localStorage.getItem(
+        MIC_DEVICE_STORAGE_KEY
+      );
 
-      let audioConstraints = {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+    try {
+      let stream = null;
+
+      const audioConstraints = {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+
         channelCount: 1,
+        sampleRate: 48000,
+        sampleSize: 16,
       };
 
-      // JBL mikrofon zaten görünüyorsa doğrudan onu seç
-      if (devices.input) {
-        audioConstraints.deviceId = {
-          exact:
-            devices.input.deviceId,
-        };
-
-        console.log(
-          `[voice] JBL mikrofon kullanılacak: ${devices.input.label}`
-        );
-      } else {
-        console.log(
-          "[voice] JBL mikrofon henüz bulunamadı, varsayılan mikrofon istenecek."
-        );
-      }
-
-      let stream =
-        await navigator.mediaDevices.getUserMedia(
-          {
-            audio: audioConstraints,
-          }
-        );
-
-      // İzin alındıktan sonra cihazları tekrar tara
-      devices =
-        await findJblDevices();
-
-      // İlk aşamada JBL bulunmadıysa,
-      // izin sonrası bulunan JBL mikrofonuna geç
-      if (
-        devices.input &&
-        !audioConstraints.deviceId
-      ) {
-        const currentTrack =
-          stream.getAudioTracks()[0];
-
-        const currentSettings =
-          currentTrack?.getSettings?.();
-
-        if (
-          currentSettings?.deviceId !==
-          devices.input.deviceId
-        ) {
-          console.log(
-            `[voice] JBL mikrofonuna geçiliyor: ${devices.input.label}`
-          );
-
-          stream
-            .getTracks()
-            .forEach((track) =>
-              track.stop()
-            );
-
+      if (savedDeviceId) {
+        try {
           stream =
             await navigator.mediaDevices.getUserMedia(
               {
                 audio: {
+                  ...audioConstraints,
                   deviceId: {
-                    exact:
-                      devices.input.deviceId,
+                    exact: savedDeviceId,
                   },
-                  echoCancellation: true,
-                  noiseSuppression: true,
-                  autoGainControl: true,
-                  channelCount: 1,
                 },
               }
             );
+        } catch (error) {
+          console.warn(
+            "[voice] Kayıtlı mikrofon kullanılamadı, varsayılan deneniyor."
+          );
+
+          localStorage.removeItem(
+            MIC_DEVICE_STORAGE_KEY
+          );
         }
       }
 
-      if (
-        !mountedRef.current
-      ) {
+      if (!stream) {
+        stream =
+          await navigator.mediaDevices.getUserMedia(
+            {
+              audio:
+                audioConstraints,
+            }
+          );
+      }
+
+      if (!mountedRef.current) {
         stream
           .getTracks()
           .forEach((track) =>
@@ -804,23 +965,44 @@ function VoiceChannel({ roomName }) {
       localStreamRef.current =
         stream;
 
-      const selectedTrack =
+      const track =
         stream.getAudioTracks()[0];
 
-      if (selectedTrack) {
+      if (track) {
         console.log(
-          "[voice] Kullanılan mikrofon:",
-          selectedTrack.label
+          "[voice-debug] MİKROFON:",
+          track.label
         );
 
         console.log(
-          "[voice] Mikrofon ayarları:",
-          selectedTrack.getSettings()
+          "[voice-debug] MİKROFON AYARLARI:",
+          track.getSettings()
+        );
+
+        console.log(
+          "[voice-debug] MİKROFON TRACK:",
+          {
+            enabled: track.enabled,
+            muted: track.muted,
+            readyState: track.readyState,
+          }
         );
       }
 
+      await refreshMicList(
+        stream
+      );
+
       joinedRoomRef.current =
         roomName;
+
+      console.log(
+        "[voice-debug] SOCKET voice:join gönderiliyor:",
+        {
+          room: roomName,
+          socketId: socket.id,
+        }
+      );
 
       socket.emit(
         "voice:join",
@@ -830,15 +1012,14 @@ function VoiceChannel({ roomName }) {
         }
       );
 
-      if (
-        mountedRef.current
-      ) {
+      if (mountedRef.current) {
         setIsInRoom(true);
         setIsJoining(false);
       }
 
       console.log(
-        `[voice] ${roomName} odasına girildi`
+        "[voice-debug] ODAYA GİRİŞ TAMAMLANDI:",
+        roomName
       );
     } catch (error) {
       console.error(
@@ -846,9 +1027,7 @@ function VoiceChannel({ roomName }) {
         error
       );
 
-      if (
-        localStreamRef.current
-      ) {
+      if (localStreamRef.current) {
         localStreamRef.current
           .getTracks()
           .forEach((track) =>
@@ -862,9 +1041,7 @@ function VoiceChannel({ roomName }) {
       joinedRoomRef.current =
         null;
 
-      if (
-        mountedRef.current
-      ) {
+      if (mountedRef.current) {
         setIsInRoom(false);
         setIsJoining(false);
       }
@@ -874,14 +1051,14 @@ function VoiceChannel({ roomName }) {
         "NotAllowedError"
       ) {
         alert(
-          "Mikrofon izni verilmedi. Tarayıcıdan mikrofon iznini aç."
+          "Mikrofon izni verilmedi."
         );
       } else if (
         error.name ===
         "NotFoundError"
       ) {
         alert(
-          "Mikrofon bulunamadı. JBL T520BT'nin bağlı olduğundan emin ol."
+          "Mikrofon bulunamadı."
         );
       } else {
         alert(
@@ -891,44 +1068,39 @@ function VoiceChannel({ roomName }) {
     }
   }
 
-  // ------------------------------------
+  // =========================================================
   // ODADAN ÇIK
-  // ------------------------------------
+  // =========================================================
 
   function leaveRoom() {
     const room =
       joinedRoomRef.current;
 
-    if (!room) {
-      setIsInRoom(false);
-      setIsJoining(false);
-      return;
-    }
-
     console.log(
-      `[voice] ${room} odasından çıkılıyor`
-    );
-
-    // Önce backend'e bildir
-    socket.emit(
-      "voice:leave",
+      "[voice-debug] LEAVE ROOM ÇAĞRILDI:",
       {
         room,
+        socketId: socket.id,
       }
     );
 
-    // Peer'ları kapat
+    if (room) {
+      socket.emit(
+        "voice:leave",
+        {
+          room,
+        }
+      );
+    }
+
     removeAllPeers();
 
-    // Mikrofonu kapat
-    if (
-      localStreamRef.current
-    ) {
+    if (localStreamRef.current) {
       localStreamRef.current
         .getTracks()
-        .forEach((track) => {
-          track.stop();
-        });
+        .forEach((track) =>
+          track.stop()
+        );
 
       localStreamRef.current =
         null;
@@ -941,31 +1113,31 @@ function VoiceChannel({ roomName }) {
     setIsJoining(false);
     setIsMuted(false);
     setUsers([]);
-
-    console.log(
-      `[voice] ${room} odasından çıkıldı`
-    );
   }
 
-  // ------------------------------------
+  // =========================================================
   // SOCKET EVENTLERİ
-  // ------------------------------------
+  // =========================================================
 
   useEffect(() => {
     function onExistingUsers(
       existingUsers
     ) {
+      console.log(
+        "[voice-debug] EXISTING USERS:",
+        existingUsers
+      );
+
       if (
         !joinedRoomRef.current ||
         !localStreamRef.current
       ) {
+        console.warn(
+          "[voice-debug] Existing users geldi ama local stream/room yok."
+        );
+
         return;
       }
-
-      console.log(
-        "[voice] Mevcut kullanıcılar:",
-        existingUsers
-      );
 
       existingUsers.forEach(
         (user) => {
@@ -974,6 +1146,10 @@ function VoiceChannel({ roomName }) {
           ) {
             return;
           }
+
+          console.log(
+            `[voice-debug] Mevcut kullanıcıya peer oluşturuluyor: ${user.id}`
+          );
 
           createPeer(
             user.id,
@@ -986,6 +1162,12 @@ function VoiceChannel({ roomName }) {
     async function onVoiceSignal(
       data
     ) {
+      console.log(
+        "[voice-debug] SIGNAL ALINDI:",
+        data?.type,
+        data?.sender
+      );
+
       if (
         !joinedRoomRef.current ||
         !data
@@ -1004,13 +1186,7 @@ function VoiceChannel({ roomName }) {
         return;
       }
 
-      console.log(
-        `[voice] Signal alındı: ${type} <- ${sender}`
-      );
-
-      if (
-        type === "offer"
-      ) {
+      if (type === "offer") {
         await handleOffer(
           sender,
           sdp
@@ -1019,9 +1195,7 @@ function VoiceChannel({ roomName }) {
         return;
       }
 
-      if (
-        type === "answer"
-      ) {
+      if (type === "answer") {
         await handleAnswer(
           sender,
           sdp
@@ -1030,9 +1204,7 @@ function VoiceChannel({ roomName }) {
         return;
       }
 
-      if (
-        type === "candidate"
-      ) {
+      if (type === "candidate") {
         await handleCandidate(
           sender,
           candidate
@@ -1043,8 +1215,8 @@ function VoiceChannel({ roomName }) {
     function onUserLeft({
       id,
     }) {
-      console.log(
-        `[voice] Kullanıcı ayrıldı: ${id}`
+      console.warn(
+        `[voice-debug] SERVER user-left gönderdi: ${id}`
       );
 
       removePeer(id);
@@ -1060,16 +1232,16 @@ function VoiceChannel({ roomName }) {
     function onVoiceUsers(
       userList
     ) {
+      console.log(
+        "[voice-debug] VOICE USERS:",
+        userList
+      );
+
       if (
         !joinedRoomRef.current
       ) {
         return;
       }
-
-      console.log(
-        "[voice] Odadaki kullanıcılar:",
-        userList
-      );
 
       setUsers(userList);
     }
@@ -1117,9 +1289,37 @@ function VoiceChannel({ roomName }) {
     };
   }, []);
 
-  // ------------------------------------
-  // ROOM DEĞİŞİNCE
-  // ------------------------------------
+  // =========================================================
+  // CİHAZ DEĞİŞİKLİĞİ
+  // =========================================================
+
+  useEffect(() => {
+    function onDeviceChange() {
+      if (localStreamRef.current) {
+        refreshMicList(
+          localStreamRef.current
+        );
+      } else {
+        refreshMicList();
+      }
+    }
+
+    navigator.mediaDevices?.addEventListener?.(
+      "devicechange",
+      onDeviceChange
+    );
+
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.(
+        "devicechange",
+        onDeviceChange
+      );
+    };
+  }, []);
+
+  // =========================================================
+  // ROOM DEĞİŞİKLİĞİ
+  // =========================================================
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1127,20 +1327,22 @@ function VoiceChannel({ roomName }) {
     joinRoom();
 
     return () => {
+      console.log(
+        "[voice-debug] VoiceChannel cleanup çalıştı."
+      );
+
       mountedRef.current = false;
 
       leaveRoom();
     };
   }, [roomName]);
 
-  // ------------------------------------
-  // MİKROFON AÇ / KAPAT
-  // ------------------------------------
+  // =========================================================
+  // MUTE
+  // =========================================================
 
   function toggleMute() {
-    if (
-      !localStreamRef.current
-    ) {
+    if (!localStreamRef.current) {
       return;
     }
 
@@ -1160,19 +1362,15 @@ function VoiceChannel({ roomName }) {
     );
 
     console.log(
-      `[voice] Mikrofon ${
-        track.enabled
-          ? "açıldı"
-          : "kapatıldı"
-      }`
+      "[voice-debug] MUTE:",
+      !track.enabled
     );
   }
 
-  // ------------------------------------
-  // RENDER
-  // ------------------------------------
+  // =========================================================
+  // YÜKLENİYOR
+  // =========================================================
 
-  // ODAYA GİRİŞ YAPILIYOR
   if (isJoining) {
     return (
       <div
@@ -1222,7 +1420,10 @@ function VoiceChannel({ roomName }) {
     );
   }
 
-  // ODAYA GİRMEMİŞSE
+  // =========================================================
+  // ODAYA GİRMEDİ
+  // =========================================================
+
   if (!isInRoom) {
     return (
       <div
@@ -1295,9 +1496,9 @@ function VoiceChannel({ roomName }) {
     );
   }
 
-  // ------------------------------------
-  // ODAYA GİRMİŞSE
-  // ------------------------------------
+  // =========================================================
+  // ODA
+  // =========================================================
 
   return (
     <div
@@ -1330,6 +1531,72 @@ function VoiceChannel({ roomName }) {
           marginBottom: "20px",
         }}
       >
+        <label
+          style={{
+            display: "block",
+            fontSize: "12px",
+            fontWeight: "bold",
+            color: "#949ba4",
+            textTransform: "uppercase",
+            marginBottom: "6px",
+          }}
+        >
+          🎤 Mikrofon
+        </label>
+
+        <select
+          value={selectedMicId || ""}
+          onChange={(e) =>
+            handleMicChange(
+              e.target.value
+            )
+          }
+          style={{
+            width: "100%",
+            padding: "9px 10px",
+            borderRadius: "6px",
+            border:
+              "1px solid #1e1f22",
+            backgroundColor:
+              "#1e1f22",
+            color: "#f2f3f5",
+            fontSize: "13px",
+            cursor: "pointer",
+          }}
+        >
+          {availableMics.length ===
+            0 && (
+            <option value="">
+              Mikrofon bulunamadı
+            </option>
+          )}
+
+          {availableMics.map(
+            (mic, index) => (
+              <option
+                key={
+                  mic.deviceId ||
+                  index
+                }
+                value={
+                  mic.deviceId
+                }
+              >
+                {mic.label ||
+                  `Mikrofon ${
+                    index + 1
+                  }`}
+              </option>
+            )
+          )}
+        </select>
+      </div>
+
+      <div
+        style={{
+          marginBottom: "20px",
+        }}
+      >
         <strong>
           Odadaki kullanıcılar:
         </strong>
@@ -1352,7 +1619,8 @@ function VoiceChannel({ roomName }) {
             >
               🟢 {user.username}
 
-              {user.id === socket.id
+              {user.id ===
+              socket.id
                 ? " (Sen)"
                 : ""}
             </div>
@@ -1377,7 +1645,7 @@ function VoiceChannel({ roomName }) {
         <button
           onClick={leaveRoom}
         >
-          🚪 Odadan Ayrıl
+          🚪 Odadan Ayr
         </button>
       </div>
     </div>
